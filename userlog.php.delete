@@ -1,0 +1,21 @@
+<?php
+function userlog($message)
+{
+/*
+    $bt = debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, 2);
+    $caller = $bt[1] ?? [];
+    $file = isset($caller['file']) ? basename($caller['file']) : 'unknown';
+*/
+
+if (!defined('DEBUG') || !DEBUG) {
+    return;
+}
+$logFile = $_SERVER['DOCUMENT_ROOT'] . '/hakuyou/debug.log';
+    if (
+        is_array($message) ||
+        is_object($message)
+    ) {
+        $message = print_r($message, true);
+    }
+    error_log('[' . date('Y-m-d H:i:s') . '] ' . $message . ':' . PHP_EOL, 3, $logFile);
+}
