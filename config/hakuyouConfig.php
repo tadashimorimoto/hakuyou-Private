@@ -22,6 +22,8 @@ $DbConfig = [
         'pass' => 'hakuyouteikyukai'
 ];
 define('SMTP_Config',     [
+        'secure' => 'tls',
+        'port' => 587,
         'host' => 'smtp.gmail.com',
         'charset' => 'utf8mb4',
         'from' => 'hakuyouteikyukai@gmail.com',

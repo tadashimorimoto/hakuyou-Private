@@ -9,7 +9,6 @@ version 2026-07-31 by 2026/07/31
 //  関数が呼び出される
 //
 debuglog('required');
-debuglog('SMTPConfig: ', $SMTPConfig);
 //require_once COMMONLIB_PATH . '/BaseApi.php';
 
 //PHP SESSION start 
@@ -54,50 +53,72 @@ class HakuyouFetch extends BaseFetch
             'success' => true
         ]);
     }
-//LOGIN2Phase
-// email と　passwordを　dbでチェック
-// 2phase loginは、ログイン成功後、セッションにユーザー情報をセットする
+// 2段階ログインのパスワード確認フェーズ
     protected function login2phase(): void
     {
-        debuglog('enter HakuyouApi.php login2phase()');
-        $email = $this->input['email'] ?? '';
-        $pass  = $this->input['password'] ?? '';
-        $userModel = new UserClass($this->db);
-        //  UserClassのlogin関数で、DBアクセス
-        $user = $userModel->login($email, $pass);
-        if (!$user) {
-            $resp['success'] = false;
-            $resp['message'] = 'email または　パスワードがちがいます';
-            $this->response($resp);
-        }
-// 2phase loginは、ログイン成功後、セッションにユーザー情報をセットする
-// 2段階認証コード発行
-        $code = random_int(100000, 999999);
+        $this->login();
+    }
+    // メールで受け取った6桁コードを検証し、成功後にログインセッションを作る
+    protected function verify2phase(): void
+    {
+        $challenge = $_SESSION['login2phase'] ?? null;
+        $code = trim((string)($this->input['code'] ?? ''));
 
-        $_SESSION['login2phase'] = [
-            'user' => $user,
-            'code' => $code,
-            'expire' => time() + 300   // 5分有効
-        ];
+        if (!is_array($challenge) || !isset($challenge['expiresAt'], $challenge['codeHash'], $challenge['user'])) {
+            unset($_SESSION['login2phase']);
+            $this->response([
+                'success' => false,
+                'message' => '認証コードを最初から取得してください'
+            ]);
+        }
+
+        if (time() > $challenge['expiresAt']) {
+            unset($_SESSION['login2phase']);
+            $this->response([
+                'success' => false,
+                'message' => '認証コードの有効期限が切れました。もう一度ログインしてください'
+            ]);
+        }
+
+        if (($challenge['attempts'] ?? 0) >= 5) {
+            unset($_SESSION['login2phase']);
+            $this->response([
+                'success' => false,
+                'message' => '認証コードの入力回数が上限に達しました。もう一度ログインしてください'
+            ]);
+        }
+
+        if (!preg_match('/^\d{6}$/', $code) || !password_verify($code, $challenge['codeHash'])) {
+            $challenge['attempts'] = ($challenge['attempts'] ?? 0) + 1;
+            if ($challenge['attempts'] >= 5) {
+                unset($_SESSION['login2phase']);
+                $this->response([
+                    'success' => false,
+                    'message' => '認証コードの入力回数が上限に達しました。もう一度ログインしてください'
+                ]);
+            }
+            $_SESSION['login2phase'] = $challenge;
+            $this->response([
+                'success' => false,
+                'message' => '認証コードが正しくありません'
+            ]);
+        }
+
+        $user = $challenge['user'];
+        unset($_SESSION['login2phase']);
+        session_regenerate_id(true);
         $this->setSessionInfo($user);
-        $resp['success'] = true;
-        $resp['data'] = $user;
-        $this->response($resp);
-   
-// 認証コードを $email に送る
-//
-        $mail=new PHPMailUtil($SMTPConfig);
-        $mail->sendMail([
-            'to' => $email,
-            'subject' => '2段階認証コード',
-            'body' => "あなたの2段階認証コードは: $code です。5分以内に入力してください。",
-            'from' => 'hakuyouteikyukai@gmail.com'
+
+        $this->response([
+            'success' => true,
+            'data' => [
+                'uid' => $user['uid'],
+                'email' => $user['email'],
+                'name' => $user['name'],
+                'userType' => $user['userType']
+            ]
         ]);
     }
-// 2段階認証コードを検証する
-    protected function verify2phase(): void
-{     
-}
 
     protected function login(): void
     //  パラメーターでわたされたuser情報を
@@ -116,10 +137,49 @@ class HakuyouFetch extends BaseFetch
             $resp['message'] = 'email または　パスワードがちがいます';
             $this->response($resp);
         }
-        $this->setSessionInfo($user);
-        $resp['success'] = true;
-        $resp['data'] = $user;
-        $this->response($resp);
+        unset($_SESSION['login2phase']);
+        $code = str_pad((string)random_int(0, 999999), 6, '0', STR_PAD_LEFT);
+        $smtp = SMTP_Config;
+
+        $_SESSION['login2phase'] = [
+            'user' => [
+                'uid' => $user['uid'],
+                'email' => $user['email'],
+                'name' => $user['name'],
+                'userType' => $user['userType']
+            ],
+            'codeHash' => password_hash($code, PASSWORD_DEFAULT),
+            'expiresAt' => time() + 300,
+            'attempts' => 0
+        ];
+
+        try {
+            $mail = new PHPMailUtil($smtp);
+            $sent = $mail->sendMail([
+                'to' => $user['email'],
+                'subject' => '【白楊庭球会NAVI】ログイン認証コード',
+                'body' => "ログイン認証コードは {$code} です。5分以内に入力してください。",
+                'from' => $smtp['from'],
+                'fromName' => '白楊庭球会NAVI'
+            ]);
+        } catch (Throwable $e) {
+            $sent = false;
+        }
+
+        if (!$sent) {
+            unset($_SESSION['login2phase']);
+            debuglog('2段階ログインの認証コード送信に失敗しました');
+            $this->response([
+                'success' => false,
+                'message' => '認証コードをメールで送信できませんでした。時間をおいて再試行してください'
+            ]);
+        }
+
+        $this->response([
+            'success' => true,
+            'requires2phase' => true,
+            'message' => '登録メールアドレスに6桁の認証コードを送信しました'
+        ]);
     }
     //  パラメーターでわたされたuser情報を
     // PHP session　にセットする
@@ -303,7 +363,6 @@ protected   function updateUser(): void
     protected function requestRegister(): void
     {
         debuglog('enter HakuyouApi.php requestRegister()');
-        debuglog('SMTP_Config: ', SMTP_Config);
         $userModel = new UserClass($this->db);
         $data = $this->input;
         // --- 全項目取得（なければ空 or null） ---
@@ -319,7 +378,6 @@ protected   function updateUser(): void
       //PHPMailerで受付メールを送信　
       //smtpでおくる
       $smtpParms=SMTP_Config;
-      debuglog('requestRegister() smtpParms: ', $smtpParms);
            if (filter_var($email, FILTER_VALIDATE_EMAIL)) {
             // 件名
 
